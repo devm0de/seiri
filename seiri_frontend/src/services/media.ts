@@ -34,7 +34,6 @@ type MediaLibraryModule = {
   SortBy: { creationTime: unknown };
 };
 let mediaLibrary: MediaLibraryModule | null = null;
-
 function getMediaLibrary(): MediaLibraryModule | null {
   if (Platform.OS === "web") return null;
   if (mediaLibrary) return mediaLibrary;
