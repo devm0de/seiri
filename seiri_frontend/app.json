@@ -33,6 +33,13 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }
+      ],[
+        "expo-media-library",
+        {
+          "photosPermission": "Allow $(PRODUCT_NAME) to access your photos so you can review and clean up your library.",
+          "savePhotosPermission": "Allow $(PRODUCT_NAME) to save duplicated photos and videos.",
+          "isAccessMediaLocationEnabled": true
+        }
       ],
       "expo-image",
       "expo-video",

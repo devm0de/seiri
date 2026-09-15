@@ -26,6 +26,7 @@ export default function TrashScreen() {
   const { state, restoreFromTrash, permanentlyDelete, emptyTrash } = useApp();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState<null | "some" | "all">(null);
+  const [working, setWorking] = useState(false);
 
   const autoDays = state.settings.autoDeleteDays;
   const isEmpty = state.trash.length === 0;
@@ -41,13 +42,20 @@ export default function TrashScreen() {
     restoreFromTrash([...selected]);
     setSelected(new Set());
   };
-  const doDelete = () => {
-    permanentlyDelete([...selected]);
+
+  // Real, permanent deletion. This shows the OS's own confirm dialog on top
+  // of ours; if the person backs out there, nothing changes here either.
+  const doDelete = async () => {
+    setWorking(true);
+    await permanentlyDelete([...selected]);
+    setWorking(false);
     setSelected(new Set());
     setConfirming(null);
   };
-  const doEmpty = () => {
-    emptyTrash();
+  const doEmpty = async () => {
+    setWorking(true);
+    await emptyTrash();
+    setWorking(false);
     setSelected(new Set());
     setConfirming(null);
   };
@@ -150,19 +158,27 @@ export default function TrashScreen() {
             <Text style={styles.modalTitle}>Permanently delete?</Text>
             <Text style={styles.modalBody}>
               {confirming === "all"
-                ? `All ${state.trash.length} items in Recently Deleted will be removed. This cannot be undone.`
-                : `${selected.size} item${selected.size === 1 ? "" : "s"} will be removed. This cannot be undone.`}
+                ? `All ${state.trash.length} items in Recently Deleted will be removed from your phone. Your device may ask you to confirm once more. This cannot be undone from this app.`
+                : `${selected.size} item${selected.size === 1 ? "" : "s"} will be removed from your phone. Your device may ask you to confirm once more. This cannot be undone from this app.`}
             </Text>
             <View style={styles.modalRow}>
-              <Pressable style={styles.modalCancel} onPress={() => setConfirming(null)} testID="confirm-cancel-btn">
+              <Pressable
+                style={styles.modalCancel}
+                onPress={() => setConfirming(null)}
+                disabled={working}
+                testID="confirm-cancel-btn"
+              >
                 <Text style={{ color: colors.onSurface, fontWeight: "700" }}>Cancel</Text>
               </Pressable>
               <Pressable
-                style={[styles.modalConfirm, { backgroundColor: colors.error }]}
+                style={[styles.modalConfirm, { backgroundColor: colors.error, opacity: working ? 0.6 : 1 }]}
                 onPress={confirming === "all" ? doEmpty : doDelete}
+                disabled={working}
                 testID="confirm-delete-btn"
               >
-                <Text style={{ color: colors.onError, fontWeight: "700" }}>Delete</Text>
+                <Text style={{ color: colors.onError, fontWeight: "700" }}>
+                  {working ? "Deleting…" : "Delete"}
+                </Text>
               </Pressable>
             </View>
           </View>

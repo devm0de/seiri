@@ -282,11 +282,13 @@ export default function CleanScreen() {
     setPermission,
     createAlbum,
     patchSettings,
+    duplicateMedia,
   } = app;
 
   const [organizeFor, setOrganizeFor] = useState<MediaItem | null>(null);
   const [infoFor, setInfoFor] = useState<MediaItem | null>(null);
   const [newAlbumInput, setNewAlbumInput] = useState("");
+  const [duplicating, setDuplicating] = useState(false);
 
   // Ask permission on first entry (native only).
   const askedRef = useRef(false);
@@ -326,6 +328,16 @@ export default function CleanScreen() {
 
   const undoDisabled = state.undoStack.length === 0;
   const redoDisabled = state.redoStack.length === 0;
+
+  const handleDuplicate = useCallback(
+    async (media: MediaItem) => {
+      setDuplicating(true);
+      const copy = await duplicateMedia(media);
+      setDuplicating(false);
+      if (copy) haptic("keep");
+    },
+    [duplicateMedia],
+  );
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]} testID="clean-screen">
@@ -477,7 +489,14 @@ export default function CleanScreen() {
       )}
 
       {/* Info sheet */}
-      {infoFor && <InfoSheet media={infoFor} onClose={() => setInfoFor(null)} />}
+      {infoFor && (
+        <InfoSheet
+          media={infoFor}
+          onClose={() => setInfoFor(null)}
+          onDuplicate={() => handleDuplicate(infoFor)}
+          duplicating={duplicating}
+        />
+      )}
     </View>
   );
 }
@@ -617,7 +636,17 @@ function OrganizeSheet({
 // ────────────────────────────────────────────────────────────────
 // Info sheet
 // ────────────────────────────────────────────────────────────────
-function InfoSheet({ media, onClose }: { media: MediaItem; onClose: () => void }) {
+function InfoSheet({
+  media,
+  onClose,
+  onDuplicate,
+  duplicating,
+}: {
+  media: MediaItem;
+  onClose: () => void;
+  onDuplicate?: () => void;
+  duplicating?: boolean;
+}) {
   const { colors } = useTheme();
   const styles = useStyles();
   const insets = useSafeAreaInsets();
@@ -628,6 +657,7 @@ function InfoSheet({ media, onClose }: { media: MediaItem; onClose: () => void }
     ["Resolution", `${media.width} × ${media.height}`],
     ["Created", formatDate(media.creationTime)],
     ...(media.mediaType === "video" ? [["Duration", `${Math.round(media.duration)}s`]] : []),
+    ...(media.isScreenshot ? [["Screenshot", "Yes"]] : []),
   ];
   return (
     <View style={styles.sheetOverlay} testID="info-sheet">
@@ -641,6 +671,19 @@ function InfoSheet({ media, onClose }: { media: MediaItem; onClose: () => void }
             <Text style={styles.infoVal}>{v}</Text>
           </View>
         ))}
+        {onDuplicate && !media.isDemo && (
+          <Pressable
+            style={[styles.dupBtn, { backgroundColor: colors.brandPrimary, opacity: duplicating ? 0.6 : 1 }]}
+            onPress={onDuplicate}
+            disabled={duplicating}
+            testID="duplicate-media-btn"
+          >
+            <Ionicons name="copy" size={18} color={colors.onBrandPrimary} />
+            <Text style={{ color: colors.onBrandPrimary, fontWeight: "700" }}>
+              {duplicating ? "Duplicating…" : "Duplicate to gallery"}
+            </Text>
+          </Pressable>
+        )}
       </View>
     </View>
   );
@@ -819,6 +862,16 @@ const useStyles = makeStyles((c) => ({
     justifyContent: "center",
   },
   sheetSkip: { alignItems: "center", marginTop: 16 },
+
+  dupBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginTop: 16,
+  },
 
   infoRow: {
     flexDirection: "row",

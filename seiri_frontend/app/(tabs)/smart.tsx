@@ -15,12 +15,14 @@ type Bucket = {
   items: MediaItem[];
 };
 
+// Groups by real content fingerprint when available (set by the background
+// enrichment pass in AppContext), falling back to filename+size for items
+// that haven't been hashed yet.
 function detectDuplicates(list: MediaItem[]): MediaItem[] {
-  // Exact duplicate by filename + size heuristic.
   const seen = new Map<string, MediaItem>();
   const dups: MediaItem[] = [];
   for (const m of list) {
-    const k = `${m.filename}|${m.fileSize}`;
+    const k = m.contentHash || `${m.filename}|${m.fileSize}`;
     const prev = seen.get(k);
     if (prev) dups.push(m);
     else seen.set(k, m);
@@ -74,7 +76,11 @@ export default function SmartScreen() {
         label: "Screenshots",
         icon: "phone-portrait",
         color: colors.warning,
-        items: state.media.filter((m) => m.filename.toLowerCase().includes("screenshot")),
+        // Real OS "Screenshots" album membership (photos AND videos),
+        // falls back to filename for anything not yet classified.
+        items: state.media.filter(
+          (m) => m.isScreenshot ?? m.filename.toLowerCase().includes("screenshot"),
+        ),
       },
       {
         key: "large-photos",

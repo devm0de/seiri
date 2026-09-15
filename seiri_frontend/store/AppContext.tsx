@@ -1,6 +1,5 @@
 // Global app state: settings, media list, trash, albums, undo/redo stack.
 // Persistence: SQLite (albums, trash, settings), all reactive in-memory.
-
 import React, {
   createContext,
   useCallback,
@@ -10,15 +9,21 @@ import React, {
   useReducer,
   useRef,
 } from "react";
-
 import { getDb, kvGet, kvSet } from "@/db";
-import { loadAllMedia, MediaItem, PermissionState } from "@/services/media";
+import {
+  loadAllMedia,
+  MediaItem,
+  PermissionState,
+  deleteAssetsFromDevice,
+  duplicateAssetToLibrary,
+  enrichMediaItem,
+  computeQuickHash,
+} from "@/services/media";
 
 export type TrashItem = { media: MediaItem; deletedAt: number };
 export type Album = { id: string; name: string; coverUri?: string; createdAt: number; count: number };
 export type AutoDeleteDays = 7 | 30 | 90 | 0; // 0 = never
 export type ThemePref = "system" | "light" | "dark";
-
 export type Settings = {
   themePref: ThemePref;
   askOrganizeOnKeep: boolean;
@@ -69,6 +74,8 @@ type Msg =
   | { type: "BOOT"; payload: Partial<State> }
   | { type: "SET_PERMISSION"; payload: PermissionState }
   | { type: "SET_MEDIA"; payload: MediaItem[] }
+  | { type: "ADD_MEDIA_ITEM"; item: MediaItem }
+  | { type: "PATCH_MEDIA_ITEMS"; items: MediaItem[] }
   | { type: "PATCH_SETTINGS"; payload: Partial<Settings> }
   | { type: "APPLY_ACTION"; action: Action; pushUndo: boolean; clearRedo: boolean }
   | { type: "UNDO" }
@@ -149,6 +156,15 @@ function reducer(state: State, msg: Msg): State {
       return { ...state, permission: msg.payload };
     case "SET_MEDIA":
       return { ...state, media: msg.payload, cursor: 0 };
+    case "ADD_MEDIA_ITEM":
+      return { ...state, media: [...state.media, msg.item] };
+    case "PATCH_MEDIA_ITEMS": {
+      const map = new Map(msg.items.map((i) => [i.id, i]));
+      return {
+        ...state,
+        media: state.media.map((m) => map.get(m.id) ?? m),
+      };
+    }
     case "PATCH_SETTINGS":
       return { ...state, settings: { ...state.settings, ...msg.payload } };
     case "APPLY_ACTION": {
@@ -162,7 +178,6 @@ function reducer(state: State, msg: Msg): State {
     case "UNDO": {
       const [last, ...rest] = state.undoStack;
       if (!last) return state;
-      // Special case: 'keep' just moved cursor forward; step back.
       if (last.kind === "keep") {
         const cursor = Math.max(0, state.cursor - 1);
         return {
@@ -174,7 +189,6 @@ function reducer(state: State, msg: Msg): State {
       }
       const reversed = reverseOf(last);
       const next = applyAction(state, reversed);
-      // If we reversed a delete/organize, step cursor back so the item appears again.
       const cursor =
         last.kind === "delete" || last.kind === "organize"
           ? Math.max(0, state.cursor - 1)
@@ -235,14 +249,18 @@ type Ctx = {
   undo: () => void;
   redo: () => void;
   restoreFromTrash: (ids: string[]) => void;
-  permanentlyDelete: (ids: string[]) => void;
-  emptyTrash: () => void;
+  /** Actually deletes from the phone (shows the OS confirm dialog). Resolves
+   * once the user has answered; does nothing to app state if they cancel. */
+  permanentlyDelete: (ids: string[]) => Promise<void>;
+  emptyTrash: () => Promise<void>;
   createAlbum: (name: string) => Album;
   renameAlbum: (id: string, name: string) => void;
   removeAlbum: (id: string) => void;
   moveToAlbum: (mediaId: string, albumId: string) => void;
   removeFromAlbum: (mediaId: string, albumId: string) => void;
   setCursor: (idx: number) => void;
+  /** Copies + saves a duplicate of this photo/video back into the gallery. */
+  duplicateMedia: (m: MediaItem) => Promise<MediaItem | null>;
 };
 
 const AppCtx = createContext<Ctx | null>(null);
@@ -304,6 +322,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             `DELETE FROM trash WHERE media_id IN (${placeholders})`,
             expiredIds,
           );
+          // Items that age out of the app's trash automatically are also
+          // actually removed from the device, not just forgotten by the app.
+          deleteAssetsFromDevice(expiredIds);
         }
         dispatch({
           type: "BOOT",
@@ -314,6 +335,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
     })();
   }, []);
+
+  // Background enrichment: fill in real file size + a duplicate-detection
+  // hash for real (non-demo) items, a batch at a time so it doesn't block
+  // the UI or hammer the device on huge libraries.
+  useEffect(() => {
+    if (!state.ready) return;
+    let cancelled = false;
+    (async () => {
+      const targets = state.media
+        .filter((m) => !m.isDemo && (!m.fileSize || !m.contentHash))
+        .slice(0, 400);
+      const CONCURRENCY = 6;
+      for (let i = 0; i < targets.length; i += CONCURRENCY) {
+        if (cancelled) return;
+        const batch = targets.slice(i, i + CONCURRENCY);
+        const enriched = await Promise.all(
+          batch.map(async (m) => {
+            const withSize = await enrichMediaItem(m);
+            const contentHash = await computeQuickHash(withSize);
+            return { ...withSize, contentHash };
+          }),
+        );
+        if (!cancelled) dispatch({ type: "PATCH_MEDIA_ITEMS", items: enriched });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Re-run when the media set changes (reload/duplicate), not on every
+    // enrichment patch (avoided via the missing-field filter above).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.ready, state.media.length]);
 
   const reloadMedia = useCallback(async () => {
     const media = await loadAllMedia();
@@ -344,6 +397,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     await db.runAsync(`DELETE FROM trash WHERE media_id IN (${placeholders})`, ids);
   };
 
+  // Soft delete: item moves into the app's own "Recently Deleted" tab. The
+  // file is NOT touched on the device yet — this is what undo reverses.
   const swipeDelete = useCallback((m: MediaItem) => {
     dispatch({ type: "APPLY_ACTION", action: { kind: "delete", media: m }, pushUndo: true, clearRedo: true });
     persistTrashAdd({ media: m, deletedAt: Date.now() });
@@ -376,6 +431,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: "UNDO" });
     if (last?.kind === "delete") persistTrashRemove([last.media.id]);
   }, []);
+
   const redo = useCallback(() => {
     const last = stateRef.current.redoStack[0];
     dispatch({ type: "REDO" });
@@ -387,13 +443,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     persistTrashRemove(ids);
   }, []);
 
-  const permanentlyDelete = useCallback((ids: string[]) => {
+  // Real, permanent deletion. Shows the OS confirm dialog; if the user
+  // cancels it, nothing in the app changes and the items stay in trash.
+  const permanentlyDelete = useCallback(async (ids: string[]) => {
+    const ok = await deleteAssetsFromDevice(ids);
+    if (!ok) return;
     dispatch({ type: "PURGE_TRASH", ids });
     persistTrashRemove(ids);
   }, []);
 
-  const emptyTrash = useCallback(() => {
+  const emptyTrash = useCallback(async () => {
     const ids = stateRef.current.trash.map((t) => t.media.id);
+    if (!ids.length) return;
+    const ok = await deleteAssetsFromDevice(ids);
+    if (!ok) return;
     dispatch({ type: "EMPTY_TRASH" });
     persistTrashRemove(ids);
   }, []);
@@ -458,6 +521,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: "BOOT", payload: { cursor: idx } });
   }, []);
 
+  // Copy/duplicate a photo or video and save it back to the gallery.
+  const duplicateMedia = useCallback(async (m: MediaItem): Promise<MediaItem | null> => {
+    const copy = await duplicateAssetToLibrary(m);
+    if (copy) dispatch({ type: "ADD_MEDIA_ITEM", item: copy });
+    return copy;
+  }, []);
+
   const value = useMemo<Ctx>(
     () => ({
       state,
@@ -480,8 +550,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       moveToAlbum,
       removeFromAlbum,
       setCursor,
+      duplicateMedia,
     }),
-    [state, reloadMedia, setPermission, patchSettings, swipeDelete, swipeKeep, organize, undo, redo, restoreFromTrash, permanentlyDelete, emptyTrash, createAlbum, renameAlbum, removeAlbum, moveToAlbum, removeFromAlbum, setCursor],
+    [
+      state,
+      reloadMedia,
+      setPermission,
+      patchSettings,
+      swipeDelete,
+      swipeKeep,
+      organize,
+      undo,
+      redo,
+      restoreFromTrash,
+      permanentlyDelete,
+      emptyTrash,
+      createAlbum,
+      renameAlbum,
+      removeAlbum,
+      moveToAlbum,
+      removeFromAlbum,
+      setCursor,
+      duplicateMedia,
+    ],
   );
 
   return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
