@@ -1,6 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { BlurView } from "expo-blur";
 import * as Haptics from "expo-haptics";
+import * as MediaLibrary from "expo-media-library";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { useVideoPlayer, VideoView } from "expo-video";
@@ -26,9 +27,28 @@ import Animated, {
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { MediaItem, requestPermission } from "@/services/media";
 import { formatBytes, useApp } from "../../store/AppContext";
 import { makeStyles, useTheme } from "../../theme";
+
+type MediaItem = {
+  id: string;
+  uri: string;
+  filename: string;
+  mediaType: "photo" | "video";
+  fileSize: number;
+  width: number;
+  height: number;
+  creationTime: number;
+  duration: number;
+  isScreenshot: boolean;
+  isDemo: boolean;
+};
+
+async function requestPermission(): Promise<MediaLibrary.PermissionStatus> {
+  if (Platform.OS === "web") return MediaLibrary.PermissionStatus.DENIED;
+  const result = await MediaLibrary.requestPermissionsAsync();
+  return result.status;
+}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get("window");
 const SWIPE_X = SCREEN_W * 0.28;
