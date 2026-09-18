@@ -29,20 +29,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { formatBytes, useApp } from "../../store/AppContext";
 import { makeStyles, useTheme } from "../../theme";
-
-type MediaItem = {
-  id: string;
-  uri: string;
-  filename: string;
-  mediaType: "photo" | "video";
-  fileSize: number;
-  width: number;
-  height: number;
-  creationTime: number;
-  duration: number;
-  isScreenshot: boolean;
-  isDemo: boolean;
-};
+import type { MediaItem } from "@/services/media";
 
 async function requestPermission(): Promise<MediaLibrary.PermissionStatus> {
   if (Platform.OS === "web") return MediaLibrary.PermissionStatus.DENIED;
@@ -96,12 +83,12 @@ function Card({ media, isTop, onSwipe, onOpenInfo, gesturesEnabled }: CardProps)
   }, [isTop, scale]);
 
   const player = useVideoPlayer(
-    media.mediaType === "video" && !media.isDemo ? media.uri : null,
-    (p) => {
-      p.loop = true;
-      if (isTop) p.play();
-    },
-  );
+  media.mediaType === "video" && !media.isDemo && isTop ? media.uri : null,
+  (p) => {
+    p.loop = true;
+    if (isTop) p.play();
+  },
+);
 
   const flyOff = useCallback(
     (dir: Decision) => {
@@ -250,7 +237,7 @@ function Card({ media, isTop, onSwipe, onOpenInfo, gesturesEnabled }: CardProps)
         >
           <Ionicons name="information-circle-outline" size={16} color="#FFF" />
           <Text style={styles.infoPillText}>
-            {formatDate(media.creationTime)} · {formatBytes(media.fileSize)}
+            {formatDate(media.creationTime)} · {formatBytes(media.fileSize ?? 0)}
           </Text>
         </Pressable>
 
@@ -269,7 +256,7 @@ function Card({ media, isTop, onSwipe, onOpenInfo, gesturesEnabled }: CardProps)
           <View style={styles.videoBadge}>
             <Ionicons name="videocam" size={14} color="#FFF" />
             <Text style={styles.videoBadgeText}>
-              {media.duration > 0 ? `${Math.round(media.duration)}s` : "Video"}
+              {(media.duration ?? 0) > 0 ? `${Math.round(media.duration ?? 0)}s` : "Video"}
             </Text>
           </View>
         )}
@@ -670,14 +657,16 @@ function InfoSheet({
   const { colors } = useTheme();
   const styles = useStyles();
   const insets = useSafeAreaInsets();
-  const rows = [
+  const rows: [string, string][] = [
     ["File", media.filename],
     ["Type", media.mediaType === "video" ? "Video" : "Photo"],
-    ["Size", formatBytes(media.fileSize)],
+    ["Size", formatBytes(media.fileSize ?? 0)],
     ["Resolution", `${media.width} × ${media.height}`],
     ["Created", formatDate(media.creationTime)],
-    ...(media.mediaType === "video" ? [["Duration", `${Math.round(media.duration)}s`]] : []),
-    ...(media.isScreenshot ? [["Screenshot", "Yes"]] : []),
+    ...((media.mediaType === "video"
+      ? [["Duration", `${Math.round(media.duration ?? 0)}s`]]
+      : []) as [string, string][]),
+    ...((media.isScreenshot ? [["Screenshot", "Yes"]] : []) as [string, string][]),
   ];
   return (
     <View style={styles.sheetOverlay} testID="info-sheet">

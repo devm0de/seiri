@@ -9,6 +9,7 @@ import React, {
   useReducer,
   useRef,
 } from "react";
+import { AppState } from "react-native";
 import { getDb, kvGet, kvSet } from "@/db";
 import {
   loadAllMedia,
@@ -127,9 +128,13 @@ function applyAction(state: State, action: Action): State {
       };
     }
     case "restore": {
+      // Put the item back into the swipe queue if it's not already there.
+      // This is what makes "undo" actually restore the picture on screen.
+      const alreadyInMedia = state.media.some((x) => x.id === action.media.id);
       return {
         ...state,
         trash: state.trash.filter((t) => t.media.id !== action.media.id),
+        media: alreadyInMedia ? state.media : [...state.media, action.media],
       };
     }
   }
@@ -270,6 +275,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  // The most recent soft-delete that hasn't been committed to the device yet.
+  // It stays pending until the user swipes/organizes again, hits undo, or the
+  // app is backgrounded — whichever comes first. This is what lets undo truly
+  // restore the file to the gallery, because the device was never touched.
+  const pendingDelete = useRef<MediaItem | null>(null);
+
+  // ---- Device commit: only called when we're sure the user has moved on ----
+  const flushPendingDelete = useCallback(async () => {
+    const item = pendingDelete.current;
+    if (!item) return;
+    pendingDelete.current = null;
+
+    const ok = await deleteAssetsFromDevice([item.id]);
+    if (!ok) {
+      // User cancelled the OS dialog, or the delete failed. Pull it back out
+      // of app trash so the app reflects reality.
+      dispatch({ type: "PURGE_TRASH", ids: [item.id] });
+      await persistTrashRemove([item.id]);
+    }
+  }, []);
+
   // Boot: hydrate settings + albums + trash from SQLite, then load media.
   useEffect(() => {
     (async () => {
@@ -340,6 +366,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // hash for real (non-demo) items, a batch at a time so it doesn't block
   // the UI or hammer the device on huge libraries.
   useEffect(() => {
+      // return; // <-- DISABLED FOR TESTING
+
     if (!state.ready) return;
     let cancelled = false;
     (async () => {
@@ -367,6 +395,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // enrichment patch (avoided via the missing-field filter above).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.ready, state.media.length]);
+
+  // Commit any pending delete when the app goes to background/inactive.
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "background" || next === "inactive") {
+        flushPendingDelete();
+      }
+    });
+    return () => sub.remove();
+  }, [flushPendingDelete]);
+
+  // Best-effort commit on unmount.
+  useEffect(() => {
+    return () => {
+      const item = pendingDelete.current;
+      if (item) {
+        pendingDelete.current = null;
+        deleteAssetsFromDevice([item.id]);
+      }
+    };
+  }, []);
 
   const reloadMedia = useCallback(async () => {
     const media = await loadAllMedia();
@@ -397,16 +446,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     await db.runAsync(`DELETE FROM trash WHERE media_id IN (${placeholders})`, ids);
   };
 
-  // Soft delete: item moves into the app's own "Recently Deleted" tab. The
-  // file is NOT touched on the device yet — this is what undo reverses.
-  const swipeDelete = useCallback((m: MediaItem) => {
-    dispatch({ type: "APPLY_ACTION", action: { kind: "delete", media: m }, pushUndo: true, clearRedo: true });
-    persistTrashAdd({ media: m, deletedAt: Date.now() });
-  }, []);
+  // Soft delete: item goes into the app's "Recently Deleted" tab. The file
+  // on the device is NOT touched yet. It stays pending until the user swipes
+  // again, organizes, or backgrounds the app — at which point we commit it to
+  // the OS recycle bin. Hitting undo before that cancels the device delete
+  // entirely, which is what makes "restore to gallery" actually work.
+  const swipeDelete = useCallback(
+    (m: MediaItem) => {
+      // Commit the previous pending delete (if any) to the device.
+      flushPendingDelete();
 
-  const swipeKeep = useCallback((m: MediaItem) => {
-    dispatch({ type: "APPLY_ACTION", action: { kind: "keep", media: m }, pushUndo: true, clearRedo: true });
-  }, []);
+      // Soft-delete this one: app trash only, device untouched.
+      dispatch({
+        type: "APPLY_ACTION",
+        action: { kind: "delete", media: m },
+        pushUndo: true,
+        clearRedo: true,
+      });
+      persistTrashAdd({ media: m, deletedAt: Date.now() });
+
+      // Mark it as the new pending delete.
+      pendingDelete.current = m;
+    },
+    [flushPendingDelete],
+  );
+
+  const swipeKeep = useCallback(
+    (m: MediaItem) => {
+      flushPendingDelete();
+      dispatch({ type: "APPLY_ACTION", action: { kind: "keep", media: m }, pushUndo: true, clearRedo: true });
+    },
+    [flushPendingDelete],
+  );
 
   const persistAlbumItem = async (albumId: string, mediaId: string) => {
     const db = await getDb();
@@ -416,29 +487,59 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     );
   };
 
-  const organize = useCallback((m: MediaItem, albumId: string) => {
-    dispatch({
-      type: "APPLY_ACTION",
-      action: { kind: "organize", media: m, albumId },
-      pushUndo: true,
-      clearRedo: true,
-    });
-    persistAlbumItem(albumId, m.id);
-  }, []);
+  const organize = useCallback(
+    (m: MediaItem, albumId: string) => {
+      flushPendingDelete();
+      dispatch({
+        type: "APPLY_ACTION",
+        action: { kind: "organize", media: m, albumId },
+        pushUndo: true,
+        clearRedo: true,
+      });
+      persistAlbumItem(albumId, m.id);
+    },
+    [flushPendingDelete],
+  );
 
   const undo = useCallback(() => {
     const last = stateRef.current.undoStack[0];
+    if (!last) return;
+
+    // If we're undoing a delete that hasn't been committed to the device yet,
+    // cancel it — the file was never touched, so it's a true restore.
+    if (last.kind === "delete") {
+      if (pendingDelete.current?.id === last.media.id) {
+        pendingDelete.current = null;
+      }
+      persistTrashRemove([last.media.id]);
+    }
+
     dispatch({ type: "UNDO" });
-    if (last?.kind === "delete") persistTrashRemove([last.media.id]);
   }, []);
 
-  const redo = useCallback(() => {
-    const last = stateRef.current.redoStack[0];
-    dispatch({ type: "REDO" });
-    if (last?.kind === "delete") persistTrashAdd({ media: last.media, deletedAt: Date.now() });
-  }, []);
+  const redo = useCallback(
+    () => {
+      const last = stateRef.current.redoStack[0];
+      if (!last) return;
+
+      flushPendingDelete();
+      dispatch({ type: "REDO" });
+
+      if (last.kind === "delete") {
+        persistTrashAdd({ media: last.media, deletedAt: Date.now() });
+        pendingDelete.current = last.media;
+      }
+    },
+    [flushPendingDelete],
+  );
 
   const restoreFromTrash = useCallback((ids: string[]) => {
+    // If we're restoring the currently-pending delete, cancel the device
+    // delete so the file stays in the gallery. If it was already committed,
+    // we can only remove it from app trash (the OS owns it now).
+    if (pendingDelete.current && ids.includes(pendingDelete.current.id)) {
+      pendingDelete.current = null;
+    }
     dispatch({ type: "PURGE_TRASH", ids });
     persistTrashRemove(ids);
   }, []);
