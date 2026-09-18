@@ -8,6 +8,7 @@ import {
   deleteAssetsAsync,
   createAssetAsync,
   getAssetInfoAsync,
+  // getAlbumAsync,
 } from "expo-media-library";
 import { File, Directory, Paths } from "expo-file-system";
 
@@ -29,7 +30,7 @@ export type MediaItem = {
   isDemo?: boolean;
   fileSize?: number;
   contentHash?: string;
-  isScreenshot?: boolean;   // <-- must be here
+  isScreenshot?: boolean;
 };
 
 // Kept for backwards compatibility with any file that imports AppMedia.
@@ -39,40 +40,44 @@ export type AppMedia = MediaItem;
 // Loading media
 // ---------------------------------------------------------------------------
 
-export async function loadAllMedia(): Promise<MediaItem[]> {
-  // true = request read AND write access.
-  // Write access is required for deleteAssetsAsync (swipe-to-trash) and
-  // createAssetAsync (duplicate). Without it, those calls silently fail.
-  const permission = await requestPermissionsAsync();
+/**
+ * Loads only the assets inside a specific album, so the swipe queue (and
+ * therefore every delete/keep/organize action) is scoped to that album.
+ * Nothing outside the album can be touched.
+ *
+ * Returns an empty array if the album doesn't exist.
+ */
+export async function loadAlbumMedia(albumName: string): Promise<MediaItem[]> {
+  const permission = await requestPermissionsAsync(true);
+  if (!permission.granted) throw new Error("Gallery permission was not granted.");
 
-  if (!permission.granted) {
-    throw new Error("Gallery permission was not granted.");
-  }
+  // Use the NEW API's album lookup, which returns the Album type that
+  // Query.album(...) accepts. Do NOT use getAlbumAsync here — that's the
+  // legacy API and returns an incompatible Album type.
+  const { Album } = await import("expo-media-library");
+  const album = await (Album as any).get(albumName);
+  if (!album) return [];
 
   const assets = await new Query()
+    .album(album)
     .orderBy({ key: AssetField.CREATION_TIME, ascending: false })
     .limit(1000)
     .exe();
 
-  const mediaItems: MediaItem[] = [];
-
+  const items: MediaItem[] = [];
   for (const asset of assets) {
-    const mediaType = await asset.getMediaType();
+    const [uri, filename, width, height, duration, creationTime, mediaType] =
+      await Promise.all([
+        asset.getUri(),
+        asset.getFilename(),
+        asset.getWidth(),
+        asset.getHeight(),
+        asset.getDuration(),
+        asset.getCreationTime(),
+        asset.getMediaType(),
+      ]);
 
-    if (mediaType !== MediaType.IMAGE && mediaType !== MediaType.VIDEO) {
-      continue;
-    }
-
-    const [uri, filename, width, height, duration, creationTime] = await Promise.all([
-      asset.getUri(),
-      asset.getFilename(),
-      asset.getWidth(),
-      asset.getHeight(),
-      mediaType === MediaType.VIDEO ? asset.getDuration() : Promise.resolve(null),
-      asset.getCreationTime(),
-    ]);
-
-    mediaItems.push({
+    items.push({
       id: asset.id,
       uri,
       filename,
@@ -84,7 +89,7 @@ export async function loadAllMedia(): Promise<MediaItem[]> {
     });
   }
 
-  return mediaItems;
+  return items;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,12 +142,13 @@ export async function computeQuickHash(m: MediaItem): Promise<string> {
   }
   return `qh_${(h >>> 0).toString(16)}`;
 }
+
 // ---------------------------------------------------------------------------
 // Device deletion
 // ---------------------------------------------------------------------------
 
 /**
- * Permanently deletes the given media assets from the device.
+ * Deletes the given media assets from the device.
  * Shows the OS confirmation dialog; resolves `true` if the user confirmed
  * and the deletion succeeded, `false` if they cancelled or it failed.
  *

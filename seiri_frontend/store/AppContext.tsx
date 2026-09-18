@@ -12,7 +12,8 @@ import React, {
 import { AppState } from "react-native";
 import { getDb, kvGet, kvSet } from "@/db";
 import {
-  loadAllMedia,
+  // loadAllMedia,
+  loadAlbumMedia,
   MediaItem,
   PermissionState,
   deleteAssetsFromDevice,
@@ -331,7 +332,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           media: JSON.parse(r.snapshot),
           deletedAt: r.deleted_at,
         }));
-        const media = await loadAllMedia();
+        const media = await loadAlbumMedia("testapp"); // <-- TODO: remove testapp filter once we have real media
         // Auto-purge trash beyond auto-delete window.
         const days = settings.autoDeleteDays;
         const now = Date.now();
@@ -418,7 +419,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const reloadMedia = useCallback(async () => {
-    const media = await loadAllMedia();
+    const media = await loadAlbumMedia("testapp");
     dispatch({ type: "SET_MEDIA", payload: media });
   }, []);
 
