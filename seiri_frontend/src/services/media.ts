@@ -11,7 +11,9 @@ import {
   // getAlbumAsync,
 } from "expo-media-library";
 import { File, Directory, Paths } from "expo-file-system";
-
+import { Asset } from 'expo-media-library';
+import * as LegacyMediaLibrary from 'expo-media-library/legacy';
+import { Platform } from 'react-native';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -92,6 +94,20 @@ export async function loadAlbumMedia(albumName: string): Promise<MediaItem[]> {
   return items;
 }
 
+async function convertStoredIdToAsset(storedId: string): Promise<Asset> {
+  console.log('Converting stored ID:', storedId);
+  if (Platform.OS === 'ios') {
+    // On iOS, the legacy ID just needs the ph:// prefix.
+    // If your stored ID already has ph://, this will double it, so you may need a check.
+    const uri = storedId.startsWith('ph://') ? storedId : `ph://${storedId}`;
+    return new Asset(uri);
+  } else {
+    // On Android, we need to resolve the numeric MediaStore ID to a content:// URI.
+    const contentUri = await LegacyMediaLibrary.getAssetContentUriAsync(storedId);
+    return new Asset(contentUri);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Enrichment: file size + content hash
 // ---------------------------------------------------------------------------
@@ -158,11 +174,20 @@ export async function computeQuickHash(m: MediaItem): Promise<string> {
  *
  * Requires WRITE permission — see requestPermissionsAsync(true) above.
  */
+// Make sure to import Asset from expo-media-library at the top
+
 export async function deleteAssetsFromDevice(ids: string[]): Promise<boolean> {
   if (!ids.length) return true;
   try {
-    const ok = await deleteAssetsAsync(ids);
-    return ok === true;
+    // 1. Convert all stored IDs to Asset instances
+    const assets = await Promise.all(
+      ids.map(id => convertStoredIdToAsset(id))
+    );
+
+    // 2. Delete the assets using the new static method
+    await Asset.delete(assets);
+    
+    return true;
   } catch (e) {
     console.warn("deleteAssetsFromDevice failed:", e);
     return false;

@@ -1,9 +1,10 @@
 import { Ionicons } from "@expo/vector-icons";
-import { ScrollView, Switch, Text, View } from "react-native";
+import { Pressable, ScrollView, Switch, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AutoDeleteDays, ThemePref, useApp } from "../../store/AppContext";
 import { makeStyles, useTheme } from "../../theme";
+import { router } from "expo-router";
 
 export default function SettingsScreen() {
   const { colors } = useTheme();
@@ -73,6 +74,14 @@ export default function SettingsScreen() {
               testID="gestures-switch"
             />
           </Row>
+          <Row testID="dev-row">
+              <Ionicons name="information-circle" size={20} color={colors.brandPrimary} />
+             <Pressable onPress={() => router.push("/dev")}>
+                <Text style={styles.rowText}>
+                  Dev</Text>
+              </Pressable>
+          </Row>
+          
         </Section>
 
         <Section title="Auto-delete window">
@@ -118,8 +127,6 @@ export default function SettingsScreen() {
                 ? "Granted"
                 : state.permission === "denied"
                 ? "Denied"
-                : state.permission === "unavailable"
-                ? "Preview mode"
                 : "Not asked"}
             </Text>
           </Row>

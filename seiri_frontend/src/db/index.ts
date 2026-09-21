@@ -12,6 +12,17 @@ type DBApi = {
 };
 
 let dbInstance: DBApi | null = null;
+// Dev-only helpers — safe to remove before shipping.
+export async function nukeAppTrash(): Promise<void> {
+  const db = await getDb();
+  await db.runAsync("DELETE FROM trash");
+}
+
+export async function wipeAllAppData(): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const SQLite = require("expo-sqlite") as any;
+  await SQLite.deleteDatabaseAsync("swipeclean.db");
+}
 
 // Simple in-memory implementation for web preview. Persists only for the tab.
 function makeMemoryDb(): DBApi {

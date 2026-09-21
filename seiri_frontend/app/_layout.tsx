@@ -11,7 +11,6 @@ import { queryClient } from "@/query-client";
 import { AppProvider, useApp } from "../store/AppContext";
 import { setColorScheme, useTheme } from "../theme";
 
-LogBox.ignoreAllLogs(true);
 
 // Applies user's theme preference. Rendered inside AppProvider.
 function ThemeApplier() {
@@ -44,6 +43,9 @@ export default function RootLayout() {
               <ThemeApplier />
               <ThemedStatusBar />
               <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="Dev" options={{ title: "Dev" }} />
+LogBox.ignoreAllLogs(true);
+
                 <Stack.Screen name="(tabs)" />
                 <Stack.Screen name="album/[id]" options={{ presentation: "card" }} />
               </Stack>
