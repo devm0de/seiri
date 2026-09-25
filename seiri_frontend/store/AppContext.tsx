@@ -18,6 +18,10 @@ import {
   duplicateAssetToLibrary,
   enrichMediaItem,
   computeQuickHash,
+  addAssetToDeviceAlbum,
+  removeAssetFromDeviceAlbum,
+  listDeviceAlbums,
+  DeviceAlbum,
 } from "@/services/media";
 
 export type TrashItem = { media: MediaItem; deletedAt: number };
@@ -44,6 +48,7 @@ type State = {
   cursor: number;
   trash: TrashItem[];
   albums: Album[];
+  deviceAlbums: DeviceAlbum[];
   albumItems: Record<string, string[]>;
   settings: Settings;
   undoStack: Action[];
@@ -64,6 +69,7 @@ const initial: State = {
   cursor: 0,
   trash: [],
   albums: [],
+  deviceAlbums: [],
   albumItems: {},
   settings: DEFAULTS,
   undoStack: [],
@@ -74,6 +80,7 @@ type Msg =
   | { type: "BOOT"; payload: Partial<State> }
   | { type: "SET_PERMISSION"; payload: PermissionState }
   | { type: "SET_MEDIA"; payload: MediaItem[] }
+  | { type: "SET_DEVICE_ALBUMS"; payload: DeviceAlbum[] }
   | { type: "ADD_MEDIA_ITEM"; item: MediaItem }
   | { type: "PATCH_MEDIA_ITEMS"; items: MediaItem[] }
   | { type: "PATCH_SETTINGS"; payload: Partial<Settings> }
@@ -158,6 +165,8 @@ function reducer(state: State, msg: Msg): State {
       return { ...state, permission: msg.payload };
     case "SET_MEDIA":
       return { ...state, media: msg.payload, cursor: 0 };
+    case "SET_DEVICE_ALBUMS":
+      return { ...state, deviceAlbums: msg.payload };
     case "ADD_MEDIA_ITEM":
       return { ...state, media: [...state.media, msg.item] };
     case "PATCH_MEDIA_ITEMS": {
@@ -243,11 +252,12 @@ type Ctx = {
   currentMedia: MediaItem | undefined;
   progress: { index: number; total: number };
   reloadMedia: () => Promise<void>;
+  loadDeviceAlbums: () => Promise<void>;
   setPermission: (p: PermissionState) => void;
   patchSettings: (p: Partial<Settings>) => Promise<void>;
   swipeDelete: (m: MediaItem) => void;
   swipeKeep: (m: MediaItem) => void;
-  organize: (m: MediaItem, albumId: string) => void;
+  organize: (m: MediaItem, albumId: string, albumName?: string) => void;
   undo: () => void;
   redo: () => void;
   restoreFromTrash: (ids: string[]) => void;
@@ -262,6 +272,21 @@ type Ctx = {
   setCursor: (idx: number) => void;
   duplicateMedia: (m: MediaItem) => Promise<MediaItem | null>;
 };
+
+// A photo counts as "already reviewed" if it's in the trash, has been
+// explicitly kept, or has been filed into any album. None of those should
+// show up again in the swipe queue after an app restart.
+function getReviewedIds(
+  trash: TrashItem[],
+  keptIds: string[],
+  albumItems: Record<string, string[]>,
+): Set<string> {
+  const ids = new Set<string>();
+  trash.forEach((t) => ids.add(t.media.id));
+  keptIds.forEach((id) => ids.add(id));
+  Object.values(albumItems).forEach((list) => list.forEach((id) => ids.add(id)));
+  return ids;
+}
 
 const AppCtx = createContext<Ctx | null>(null);
 
@@ -305,7 +330,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           media: JSON.parse(r.snapshot),
           deletedAt: r.deleted_at,
         }));
-        const media = await loadAlbumMedia("testapp");
+        const rawMedia = await loadAlbumMedia("testapp");
         // Auto-purge trash beyond auto-delete window.
         const days = settings.autoDeleteDays;
         const now = Date.now();
@@ -324,6 +349,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           );
           deleteAssetsFromDevice(expiredIds);
         }
+        // Don't show photos in the swipe queue that were already decided on
+        // in a previous session — trashed, kept, OR filed into an album.
+        // The phone still has the file either way (nothing physically moves
+        // just from swiping), so loadAlbumMedia would otherwise hand every
+        // one of them right back to us.
+        const keptIds = await kvGet<string[]>("keptMediaIds", []);
+        const reviewedIds = getReviewedIds(kept, keptIds, albumItems);
+        const media = rawMedia.filter((m) => !reviewedIds.has(m.id));
         dispatch({
           type: "BOOT",
           payload: { settings, albums, albumItems, trash: kept, media },
@@ -369,8 +402,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [state.ready, state.media.length]);
 
   const reloadMedia = useCallback(async () => {
-    const media = await loadAlbumMedia("testapp");
+    const rawMedia = await loadAlbumMedia("testapp");
+    // Same fix as boot: filter out anything already decided on so a manual
+    // refresh doesn't bring already-reviewed photos back into the queue.
+    const keptIds = await kvGet<string[]>("keptMediaIds", []);
+    const reviewedIds = getReviewedIds(stateRef.current.trash, keptIds, stateRef.current.albumItems);
+    const media = rawMedia.filter((m) => !reviewedIds.has(m.id));
     dispatch({ type: "SET_MEDIA", payload: media });
+  }, []);
+
+  // Reads the REAL albums already sitting on the phone (made in the
+  // camera app, WhatsApp, etc.) so the user can move photos into them
+  // too, not just into albums created inside this app.
+  const loadDeviceAlbums = useCallback(async () => {
+    const albums = await listDeviceAlbums();
+    dispatch({ type: "SET_DEVICE_ALBUMS", payload: albums });
   }, []);
 
   const setPermission = useCallback((p: PermissionState) => {
@@ -397,6 +443,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     await db.runAsync(`DELETE FROM trash WHERE media_id IN (${placeholders})`, ids);
   };
 
+  // "Kept" photos are stored as a simple list of ids in the same key-value
+  // store settings already use — no new database table needed.
+  const persistKeptAdd = async (mediaId: string) => {
+    const current = await kvGet<string[]>("keptMediaIds", []);
+    if (!current.includes(mediaId)) {
+      await kvSet("keptMediaIds", [...current, mediaId]);
+    }
+  };
+  const persistKeptRemove = async (mediaId: string) => {
+    const current = await kvGet<string[]>("keptMediaIds", []);
+    await kvSet("keptMediaIds", current.filter((id) => id !== mediaId));
+  };
+
   // Soft delete ONLY. The file on the device is not touched. It stays in the
   // app's "Recently Deleted" tab until the user explicitly empties it.
   const swipeDelete = useCallback((m: MediaItem) => {
@@ -416,6 +475,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       pushUndo: true,
       clearRedo: true,
     });
+    persistKeptAdd(m.id);
   }, []);
 
   const persistAlbumItem = async (albumId: string, mediaId: string) => {
@@ -426,7 +486,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     );
   };
 
-  const organize = useCallback((m: MediaItem, albumId: string) => {
+  const organize = useCallback((m: MediaItem, albumId: string, albumName?: string) => {
     dispatch({
       type: "APPLY_ACTION",
       action: { kind: "organize", media: m, albumId },
@@ -434,6 +494,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       clearRedo: true,
     });
     persistAlbumItem(albumId, m.id);
+    // This is what makes the album actually show up when you open your
+    // phone's own gallery app, not just inside SwipeClean.
+    //
+    // We prefer the name passed in directly, because if this album was
+    // JUST created a moment ago (the "create new album and move here"
+    // flow), it may not exist in stateRef.current.albums yet — React
+    // hasn't finished applying that state update when this runs.
+    const name = albumName ?? stateRef.current.albums.find((a) => a.id === albumId)?.name;
+    if (name) addAssetToDeviceAlbum(m.id, name);
   }, []);
 
   const undo = useCallback(() => {
@@ -443,6 +512,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // Device was never touched, so this is a full restore.
     if (last.kind === "delete") {
       persistTrashRemove([last.media.id]);
+    } else if (last.kind === "keep") {
+      persistKeptRemove(last.media.id);
     }
     dispatch({ type: "UNDO" });
   }, []);
@@ -453,6 +524,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     dispatch({ type: "REDO" });
     if (last.kind === "delete") {
       persistTrashAdd({ media: last.media, deletedAt: Date.now() });
+    } else if (last.kind === "keep") {
+      persistKeptAdd(last.media.id);
     }
   }, []);
 
@@ -521,12 +594,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const next = [...list, mediaId];
     dispatch({ type: "SET_ALBUM_ITEMS", albumId, ids: next });
     persistAlbumItem(albumId, mediaId);
+    const albumName = stateRef.current.albums.find((a) => a.id === albumId)?.name;
+    if (albumName) addAssetToDeviceAlbum(mediaId, albumName);
   }, []);
 
   const removeFromAlbum = useCallback((mediaId: string, albumId: string) => {
     const list = stateRef.current.albumItems[albumId] ?? [];
     const next = list.filter((id) => id !== mediaId);
     dispatch({ type: "SET_ALBUM_ITEMS", albumId, ids: next });
+    const albumName = stateRef.current.albums.find((a) => a.id === albumId)?.name;
     (async () => {
       const db = await getDb();
       await db.runAsync(
@@ -534,6 +610,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         [albumId, mediaId],
       );
     })();
+    if (albumName) removeAssetFromDeviceAlbum(mediaId, albumName);
   }, []);
 
   const setCursor = useCallback((idx: number) => {
@@ -552,6 +629,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       currentMedia: state.media[state.cursor],
       progress: { index: Math.min(state.cursor + 1, state.media.length), total: state.media.length },
       reloadMedia,
+      loadDeviceAlbums,
       setPermission,
       patchSettings,
       swipeDelete,
@@ -573,6 +651,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [
       state,
       reloadMedia,
+      loadDeviceAlbums,
       setPermission,
       patchSettings,
       swipeDelete,

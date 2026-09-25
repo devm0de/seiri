@@ -286,6 +286,7 @@ export default function CleanScreen() {
     undo,
     redo,
     reloadMedia,
+    loadDeviceAlbums,
     setPermission,
     createAlbum,
     patchSettings,
@@ -305,9 +306,12 @@ export default function CleanScreen() {
     (async () => {
       const p = await requestPermission();
       setPermission(p);
-      if (p === "granted") await reloadMedia();
+      if (p === "granted") {
+        await reloadMedia();
+        await loadDeviceAlbums();
+      }
     })();
-  }, [reloadMedia, setPermission]);
+  }, [reloadMedia, loadDeviceAlbums, setPermission]);
 
   const handleSwipe = useCallback(
     (media: MediaItem, d: Decision) => {
@@ -480,13 +484,27 @@ export default function CleanScreen() {
             patchSettings({ askOrganizeOnKeep: false });
             setOrganizeFor(null);
           }}
-          onPickAlbum={(id) => {
-            organize(organizeFor, id);
+          onPickAlbum={(id, name) => {
+            organize(organizeFor, id, name);
+            setOrganizeFor(null);
+          }}
+          onPickDeviceAlbum={(name) => {
+            // This album already exists on the phone but not inside the
+            // app yet — create the app-side record for it (so it shows up
+            // in your list and can be counted), then file the photo into
+            // it. organize() will see the device album already exists and
+            // just add the photo to it, not create a duplicate.
+            const a = createAlbum(name);
+            organize(organizeFor, a.id, a.name);
             setOrganizeFor(null);
           }}
           onCreateAndPick={(name) => {
             const a = createAlbum(name);
-            organize(organizeFor, a.id);
+            // Pass a.name directly instead of letting organize() look it up
+            // from state — the brand-new album hasn't landed in state yet
+            // at this exact instant, so a lookup here would come up empty
+            // and the real device album would silently fail to be created.
+            organize(organizeFor, a.id, a.name);
             setOrganizeFor(null);
             setNewAlbumInput("");
           }}
@@ -559,6 +577,7 @@ function OrganizeSheet({
   onKeepHere,
   onSkip,
   onPickAlbum,
+  onPickDeviceAlbum,
   onCreateAndPick,
   input,
   setInput,
@@ -566,7 +585,8 @@ function OrganizeSheet({
   onClose: () => void;
   onKeepHere: () => void;
   onSkip: () => void;
-  onPickAlbum: (id: string) => void;
+  onPickAlbum: (id: string, name: string) => void;
+  onPickDeviceAlbum: (name: string) => void;
   onCreateAndPick: (name: string) => void;
   input: string;
   setInput: (v: string) => void;
@@ -575,6 +595,15 @@ function OrganizeSheet({
   const styles = useStyles();
   const { state } = useApp();
   const insets = useSafeAreaInsets();
+
+  // Albums that exist on the phone but aren't tracked inside the app yet.
+  // Compared by lowercase name, since that's what ties an app album to its
+  // real device album (see addAssetToDeviceAlbum in services/media.ts).
+  const deviceOnlyAlbums = useMemo(() => {
+    const appAlbumNames = new Set(state.albums.map((a) => a.name.toLowerCase()));
+    return state.deviceAlbums.filter((d) => !appAlbumNames.has(d.name.toLowerCase()));
+  }, [state.albums, state.deviceAlbums]);
+
   return (
     <View style={styles.sheetOverlay} testID="organize-sheet">
       <Pressable style={styles.sheetBackdrop} onPress={onClose} />
@@ -594,12 +623,30 @@ function OrganizeSheet({
               <Pressable
                 key={a.id}
                 style={styles.sheetRow}
-                onPress={() => onPickAlbum(a.id)}
+                onPress={() => onPickAlbum(a.id, a.name)}
                 testID={`album-pick-${a.id}`}
               >
                 <Ionicons name="folder" size={22} color={colors.brandPrimary} />
                 <Text style={styles.sheetRowText}>{a.name}</Text>
                 <Text style={styles.sheetRowMeta}>{a.count}</Text>
+              </Pressable>
+            ))}
+          </>
+        )}
+
+        {deviceOnlyAlbums.length > 0 && (
+          <>
+            <Text style={styles.sheetSection}>Your phone's other albums</Text>
+            {deviceOnlyAlbums.map((a) => (
+              <Pressable
+                key={a.id}
+                style={styles.sheetRow}
+                onPress={() => onPickDeviceAlbum(a.name)}
+                testID={`device-album-pick-${a.id}`}
+              >
+                <Ionicons name="phone-portrait-outline" size={22} color={colors.brandPrimary} />
+                <Text style={styles.sheetRowText}>{a.name}</Text>
+                <Text style={styles.sheetRowMeta}>{a.assetCount}</Text>
               </Pressable>
             ))}
           </>
