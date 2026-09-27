@@ -20,6 +20,7 @@ import {
   computeQuickHash,
   addAssetToDeviceAlbum,
   removeAssetFromDeviceAlbum,
+  createDeviceAlbumEmpty,
   listDeviceAlbums,
   DeviceAlbum,
 } from "@/services/media";
@@ -568,6 +569,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         [album.id, album.name, null, album.createdAt],
       );
     })();
+    // Try to make this a real album on the phone right away (works
+    // immediately on iPhone; on Android it may only "take" once the first
+    // photo is added — addAssetToDeviceAlbum handles that case already).
+    createDeviceAlbumEmpty(name);
     return album;
   }, []);
 

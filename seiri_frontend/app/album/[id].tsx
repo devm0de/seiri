@@ -1,182 +1,226 @@
+// app/album/[id].tsx
+//
+// PLACEMENT: this file goes at app/album/[id].tsx — a brand new "album"
+// folder (singular — different from your existing "albums" tab) sitting
+// right next to your (tabs) folder, NOT inside it. So the layout looks
+// like:
+//
+//   app/
+//     (tabs)/
+//       ...your existing tab screens...
+//     album/
+//       [id].tsx   <-- this file
+//
+// Being outside the (tabs) group is exactly what makes it open as a
+// screen that slides in on top of the tabs (like a normal "detail" page).
+
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
-import { useState } from "react";
+import { useVideoPlayer, VideoView } from "expo-video";
+import { useEffect, useState } from "react";
 import {
+  ActivityIndicator,
+  Dimensions,
   FlatList,
   Modal,
   Pressable,
   Text,
-  TextInput,
   View,
 } from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import Animated, {
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useApp } from "../../store/AppContext";
 import { makeStyles, useTheme } from "../../theme";
+import { loadMediaForAlbum, MediaItem } from "@/services/media";
+
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get("window");
 
 export default function AlbumDetailScreen() {
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const { state } = useApp();
+  const router = useRouter();
   const { colors } = useTheme();
   const styles = useStyles();
   const insets = useSafeAreaInsets();
-  const { id } = useLocalSearchParams<{ id: string }>();
-  const router = useRouter();
-  const { state, renameAlbum, removeAlbum, removeFromAlbum } = useApp();
 
   const album = state.albums.find((a) => a.id === id);
-  const ids = state.albumItems[id ?? ""] ?? [];
-  const items = ids.map((mid) => state.media.find((m) => m.id === mid)).filter(Boolean) as any[];
+  const [photos, setPhotos] = useState<MediaItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
 
-  const [renaming, setRenaming] = useState(false);
-  const [newName, setNewName] = useState(album?.name ?? "");
-  const [confirmDel, setConfirmDel] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-
-  if (!album) {
-    return (
-      <View style={[styles.container, { paddingTop: insets.top }]} testID="album-not-found">
-        <Stack.Screen options={{ headerShown: false }} />
-        <View style={styles.empty}>
-          <Ionicons name="folder-open-outline" size={56} color={colors.muted} />
-          <Text style={styles.emptyTitle}>Album not found</Text>
-          <Pressable style={styles.backLink} onPress={() => router.back()}>
-            <Text style={{ color: colors.brandPrimary }}>Back to albums</Text>
-          </Pressable>
-        </View>
-      </View>
-    );
-  }
-
-  const toggle = (mid: string) => {
-    const next = new Set(selected);
-    if (next.has(mid)) next.delete(mid);
-    else next.add(mid);
-    setSelected(next);
-  };
-
-  const doRemoveSelected = () => {
-    selected.forEach((mid) => removeFromAlbum(mid, album.id));
-    setSelected(new Set());
-  };
-
-  const handleRename = () => {
-    const trimmed = newName.trim();
-    if (trimmed) renameAlbum(album.id, trimmed);
-    setRenaming(false);
-  };
+  // Reads straight from the phone rather than the app's in-memory list, so
+  // this always matches what's really in the album, even for photos that
+  // were added to it outside the app.
+  useEffect(() => {
+    if (!album) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      const items = await loadMediaForAlbum(album.name);
+      if (!cancelled) {
+        setPhotos(items);
+        setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [album?.name]);
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]} testID="album-detail">
-      <Stack.Screen options={{ headerShown: false }} />
+    <View style={[styles.container, { paddingTop: insets.top }]} testID="album-detail-screen">
+      {/* Sets the native header title to the album's name. */}
+      <Stack.Screen options={{ title: album?.name ?? "Album", headerBackTitle: "Albums" }} />
+
       <View style={styles.header}>
-        <Pressable onPress={() => router.back()} testID="back-btn">
-          <Ionicons name="chevron-back" size={26} color={colors.brandPrimary} />
+        <Pressable onPress={() => router.back()} style={styles.backBtn} testID="album-back-btn">
+          <Ionicons name="chevron-back" size={24} color={colors.onSurface} />
         </Pressable>
-        {renaming ? (
-          <TextInput
-            testID="rename-input"
-            style={styles.renameInput}
-            value={newName}
-            autoFocus
-            onChangeText={setNewName}
-            onSubmitEditing={handleRename}
-            onBlur={handleRename}
-          />
-        ) : (
-          <View style={{ flex: 1, marginLeft: 4 }}>
-            <Text style={styles.title} numberOfLines={1}>
-              {album.name}
-            </Text>
-            <Text style={styles.sub}>{items.length} items</Text>
-          </View>
-        )}
-        <Pressable onPress={() => setRenaming((v) => !v)} testID="rename-btn" style={styles.iconBtn}>
-          <Ionicons name={renaming ? "checkmark" : "pencil"} size={20} color={colors.brandPrimary} />
-        </Pressable>
-        <Pressable onPress={() => setConfirmDel(true)} testID="delete-album-btn" style={styles.iconBtn}>
-          <Ionicons name="trash" size={20} color={colors.error} />
-        </Pressable>
+        <Text style={styles.title} numberOfLines={1}>
+          {album?.name ?? "Album"}
+        </Text>
+        <View style={{ width: 36 }} />
       </View>
 
-      {items.length === 0 ? (
-        <View style={styles.empty}>
-          <Ionicons name="images-outline" size={56} color={colors.muted} />
-          <Text style={styles.emptyTitle}>Empty album</Text>
-          <Text style={styles.emptySub}>Add items from the Clean tab by swiping up.</Text>
+      {loading ? (
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.brandPrimary} size="large" />
+        </View>
+      ) : !album ? (
+        <View style={styles.center}>
+          <Ionicons name="alert-circle-outline" size={48} color={colors.muted} />
+          <Text style={styles.emptyText}>Couldn't find this album.</Text>
+        </View>
+      ) : photos.length === 0 ? (
+        <View style={styles.center}>
+          <Ionicons name="images-outline" size={48} color={colors.muted} />
+          <Text style={styles.emptyText}>No photos in this album yet.</Text>
         </View>
       ) : (
         <FlatList
-          data={items}
-          keyExtractor={(m) => m.id}
+          data={photos}
+          keyExtractor={(p) => p.id}
           numColumns={3}
-          contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: selected.size ? 100 : 24 }}
-          columnWrapperStyle={{ gap: 6 }}
-          ItemSeparatorComponent={() => <View style={{ height: 6 }} />}
-          renderItem={({ item }) => {
-            const isSel = selected.has(item.id);
-            return (
-              <Pressable
-                testID={`album-item-${item.id}`}
-                onPress={() => toggle(item.id)}
-                style={styles.thumbWrap}
-              >
-                <Image source={{ uri: item.uri }} style={styles.thumb} contentFit="cover" />
-                {isSel && (
-                  <View style={styles.selOverlay}>
-                    <Ionicons name="checkmark-circle" size={30} color={colors.brandPrimary} />
-                  </View>
-                )}
-              </Pressable>
-            );
-          }}
+          contentContainerStyle={{ padding: 8 }}
+          columnWrapperStyle={{ gap: 4 }}
+          ItemSeparatorComponent={() => <View style={{ height: 4 }} />}
+          renderItem={({ item, index }) => (
+            <Pressable
+              style={styles.thumbWrap}
+              onPress={() => setViewerIndex(index)}
+              testID={`album-photo-${item.id}`}
+            >
+              <Image source={{ uri: item.uri }} style={styles.thumb} contentFit="cover" transition={100} />
+              {item.mediaType === "video" && (
+                <View style={styles.videoDot}>
+                  <Ionicons name="videocam" size={12} color="#FFF" />
+                </View>
+              )}
+            </Pressable>
+          )}
         />
       )}
 
-      {selected.size > 0 && (
-        <View style={[styles.actionBar, { paddingBottom: insets.bottom + 12 }]}>
-          <Text style={styles.selCount}>{selected.size} selected</Text>
+      {/* Full-screen viewer — tap a thumbnail above to open it here. Swipe
+          left/right to move between photos, pinch or double-tap a photo to
+          zoom, videos get the phone's normal playback controls. */}
+      <Modal
+        visible={viewerIndex !== null}
+        animationType="fade"
+        onRequestClose={() => setViewerIndex(null)}
+      >
+        <View style={styles.viewerContainer}>
           <Pressable
-            testID="remove-from-album-btn"
-            style={[styles.barBtn, { backgroundColor: colors.error }]}
-            onPress={doRemoveSelected}
+            onPress={() => setViewerIndex(null)}
+            style={[styles.viewerCloseBtn, { top: insets.top + 8 }]}
+            testID="viewer-close-btn"
           >
-            <Ionicons name="remove-circle" size={18} color={colors.onError} />
-            <Text style={{ color: colors.onError, fontWeight: "700" }}>Remove from album</Text>
+            <Ionicons name="close" size={26} color="#FFF" />
           </Pressable>
-        </View>
-      )}
-
-      <Modal transparent animationType="fade" visible={confirmDel}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Ionicons name="warning" size={28} color={colors.warning} />
-            <Text style={styles.modalTitle}>Delete album?</Text>
-            <Text style={styles.modalBody}>
-              The album will be removed. Your media stays safe in your library.
-            </Text>
-            <View style={styles.modalRow}>
-              <Pressable
-                style={styles.modalCancel}
-                onPress={() => setConfirmDel(false)}
-                testID="confirm-cancel-btn"
-              >
-                <Text style={{ color: colors.onSurface, fontWeight: "700" }}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.modalConfirm, { backgroundColor: colors.error }]}
-                onPress={() => {
-                  removeAlbum(album.id);
-                  setConfirmDel(false);
-                  router.back();
-                }}
-                testID="confirm-delete-album-btn"
-              >
-                <Text style={{ color: colors.onError, fontWeight: "700" }}>Delete</Text>
-              </Pressable>
-            </View>
-          </View>
+          {viewerIndex !== null && (
+            <FlatList
+              data={photos}
+              keyExtractor={(p) => p.id}
+              horizontal
+              pagingEnabled
+              initialScrollIndex={viewerIndex}
+              getItemLayout={(_, i) => ({ length: SCREEN_W, offset: SCREEN_W * i, index: i })}
+              onMomentumScrollEnd={(e) => {
+                const idx = Math.round(e.nativeEvent.contentOffset.x / SCREEN_W);
+                setViewerIndex(idx);
+              }}
+              renderItem={({ item, index }) => (
+                <ViewerItem item={item} isActive={index === viewerIndex} />
+              )}
+            />
+          )}
         </View>
       </Modal>
+    </View>
+  );
+}
+
+// One full-screen page inside the viewer: a photo you can pinch/double-tap
+// to zoom, or a video with the phone's normal built-in playback controls.
+function ViewerItem({ item, isActive }: { item: MediaItem; isActive: boolean }) {
+  const zoom = useSharedValue(1);
+
+  const player = useVideoPlayer(item.mediaType === "video" ? item.uri : null, (p) => {
+    p.loop = false;
+  });
+
+  useEffect(() => {
+    if (item.mediaType !== "video") return;
+    if (isActive) player.play();
+    else player.pause();
+  }, [isActive, item.mediaType, player]);
+
+  const pinch = Gesture.Pinch()
+    .onUpdate((e) => {
+      zoom.value = Math.max(1, Math.min(4, e.scale));
+    })
+    .onEnd(() => {
+      zoom.value = withSpring(1);
+    });
+
+  const doubleTap = Gesture.Tap()
+    .numberOfTaps(2)
+    .onEnd(() => {
+      zoom.value = withSpring(zoom.value > 1.1 ? 1 : 2.5);
+    });
+
+  const composed = Gesture.Simultaneous(pinch, doubleTap);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: zoom.value }],
+  }));
+
+  return (
+    <View style={{ width: SCREEN_W, height: SCREEN_H, alignItems: "center", justifyContent: "center" }}>
+      {item.mediaType === "video" ? (
+        <VideoView
+          player={player}
+          style={{ width: SCREEN_W, height: SCREEN_H }}
+          contentFit="contain"
+          nativeControls
+        />
+      ) : (
+        <GestureDetector gesture={composed}>
+          <Animated.View style={[{ width: SCREEN_W, height: SCREEN_H }, animatedStyle]}>
+            <Image source={{ uri: item.uri }} style={{ width: "100%", height: "100%" }} contentFit="contain" />
+          </Animated.View>
+        </GestureDetector>
+      )}
     </View>
   );
 }
@@ -186,95 +230,31 @@ const useStyles = makeStyles((c) => ({
   header: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 12,
+    justifyContent: "space-between",
+    paddingHorizontal: 8,
     paddingVertical: 8,
-    gap: 6,
   },
-  title: { fontSize: 20, fontWeight: "800", color: c.onSurface },
-  sub: { fontSize: 12, color: c.muted },
-  iconBtn: { padding: 6 },
-  renameInput: {
-    flex: 1,
-    marginLeft: 6,
-    backgroundColor: c.surfaceSecondary,
-    color: c.onSurface,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 16,
-    fontWeight: "700",
-  },
-
-  thumbWrap: { flex: 1, aspectRatio: 1, borderRadius: 10, overflow: "hidden" },
+  backBtn: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
+  title: { flex: 1, textAlign: "center", fontSize: 18, fontWeight: "800", color: c.onSurface },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", gap: 8 },
+  emptyText: { fontSize: 14, color: c.muted },
+  thumbWrap: { flex: 1, aspectRatio: 1, borderRadius: 8, overflow: "hidden" },
   thumb: { width: "100%", height: "100%" },
-  selOverlay: {
-    ...({ position: "absolute" } as any),
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: "rgba(0,122,255,0.25)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  empty: { flex: 1, alignItems: "center", justifyContent: "center", gap: 6 },
-  emptyTitle: { fontSize: 18, fontWeight: "700", color: c.onSurface, marginTop: 8 },
-  emptySub: { fontSize: 14, color: c.muted, textAlign: "center", marginHorizontal: 32 },
-  backLink: { marginTop: 8 },
-
-  actionBar: {
+  videoDot: {
     position: "absolute",
-    left: 12,
-    right: 12,
-    bottom: 12,
-    backgroundColor: c.surfaceSecondary,
-    borderRadius: 16,
-    padding: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    shadowColor: "#000",
-    shadowOpacity: 0.15,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 6,
-  },
-  selCount: { flex: 1, fontSize: 14, fontWeight: "700", color: c.onSurface },
-  barBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 10,
-  },
-
-  modalOverlay: {
-    flex: 1,
+    bottom: 4,
+    right: 4,
     backgroundColor: "rgba(0,0,0,0.55)",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 24,
+    borderRadius: 8,
+    padding: 3,
   },
-  modalCard: {
-    backgroundColor: c.surface,
+  viewerContainer: { flex: 1, backgroundColor: "#000" },
+  viewerCloseBtn: {
+    position: "absolute",
+    right: 16,
+    zIndex: 10,
+    padding: 8,
+    backgroundColor: "rgba(255,255,255,0.15)",
     borderRadius: 20,
-    padding: 20,
-    alignItems: "center",
-    gap: 8,
-    width: "100%",
-    maxWidth: 360,
   },
-  modalTitle: { fontSize: 18, fontWeight: "800", color: c.onSurface },
-  modalBody: { fontSize: 14, color: c.muted, textAlign: "center" },
-  modalRow: { flexDirection: "row", gap: 8, marginTop: 12, width: "100%" },
-  modalCancel: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 12,
-    backgroundColor: c.surfaceSecondary,
-    alignItems: "center",
-  },
-  modalConfirm: { flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: "center" },
 }));

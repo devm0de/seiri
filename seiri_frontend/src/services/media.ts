@@ -251,12 +251,16 @@ export async function addAssetToDeviceAlbum(
     const existing = await MediaLibrary.getAlbumAsync(albumName);
     if (!existing) {
       const assetInfo = await MediaLibrary.getAssetInfoAsync(assetId);
-      // `false` here means "don't duplicate the file" — just tag the
-      // existing photo as belonging to this new album.
-      await MediaLibrary.createAlbumAsync(albumName, assetInfo, false);
+      // `true` here means "make a copy of the file into this album."
+      // We tried `false` (move, no duplicate) before, but MOVING a file
+      // between folders needs extra storage permission that many Android
+      // phones don't grant to apps, so it was failing silently. Copying
+      // uses a much more universally-allowed permission — it costs a
+      // little extra storage space, but it actually works.
+      await MediaLibrary.createAlbumAsync(albumName, assetInfo, true);
       return true;
     }
-    return await MediaLibrary.addAssetsToAlbumAsync([assetId], existing, false);
+    return await MediaLibrary.addAssetsToAlbumAsync([assetId], existing, true);
   } catch (e) {
     console.warn("addAssetToDeviceAlbum failed:", e);
     return false;
@@ -283,6 +287,53 @@ export async function removeAssetFromDeviceAlbum(
   }
 }
 
+/**
+ * Tries to create a real, empty album on the phone right away, without
+ * waiting for a photo to be added to it.
+ *
+ * On iPhone this works immediately. On many Android versions, a truly
+ * empty album/folder isn't a thing the gallery can show — the OS itself
+ * doesn't create it until it actually has a file inside. In that case
+ * this fails quietly, and the album will simply appear as soon as the
+ * first photo is moved into it via addAssetToDeviceAlbum.
+ */
+export async function createDeviceAlbumEmpty(albumName: string): Promise<boolean> {
+  try {
+    const existing = await MediaLibrary.getAlbumAsync(albumName);
+    if (existing) return true;
+    await MediaLibrary.createAlbumAsync(albumName);
+    return true;
+  } catch (e) {
+    console.warn(
+      "createDeviceAlbumEmpty: couldn't create an empty album yet (normal on some Android versions until it has a photo):",
+      e,
+    );
+    return false;
+  }
+}
+
+/**
+ * Grabs just the first photo/video's URI from an album, to use as a cover
+ * thumbnail. Much cheaper than loading the whole album when all you need
+ * is one preview image.
+ */
+export async function getAlbumCoverUri(albumName: string): Promise<string | null> {
+  try {
+    const album = await MediaLibrary.getAlbumAsync(albumName);
+    if (!album) return null;
+    const page = await MediaLibrary.getAssetsAsync({
+      first: 1,
+      album,
+      mediaType: [MediaLibrary.MediaType.photo, MediaLibrary.MediaType.video],
+      sortBy: [MediaLibrary.SortBy.creationTime],
+    });
+    return page.assets[0]?.uri ?? null;
+  } catch (e) {
+    console.warn("getAlbumCoverUri failed:", e);
+    return null;
+  }
+}
+
 /** A lightweight summary of a real album that already exists on the phone. */
 export type DeviceAlbum = { id: string; name: string; assetCount: number };
 
@@ -301,4 +352,39 @@ export async function listDeviceAlbums(): Promise<DeviceAlbum[]> {
     console.warn("listDeviceAlbums failed:", e);
     return [];
   }
+}
+
+/**
+ * Loads only the photos/videos inside ONE specific album, straight from
+ * the phone. Unlike loadAlbumMedia (used for the main swipe queue), this
+ * does NOT fall back to the whole camera roll if the album doesn't exist
+ * — an album detail screen showing every photo on the phone just because
+ * the album is empty would be very confusing. It simply returns an empty
+ * list instead.
+ */
+export async function loadMediaForAlbum(albumName: string): Promise<MediaItem[]> {
+  const permission = await MediaLibrary.getPermissionsAsync();
+  if (permission.status !== "granted") return [];
+
+  const album = await MediaLibrary.getAlbumAsync(albumName);
+  if (!album) return [];
+
+  const items: MediaItem[] = [];
+  let after: string | undefined;
+  let hasNextPage = true;
+
+  while (hasNextPage) {
+    const page = await MediaLibrary.getAssetsAsync({
+      first: 200,
+      after,
+      album,
+      mediaType: [MediaLibrary.MediaType.photo, MediaLibrary.MediaType.video],
+      sortBy: [MediaLibrary.SortBy.creationTime],
+    });
+    items.push(...page.assets.map(toMediaItem));
+    hasNextPage = page.hasNextPage;
+    after = page.endCursor;
+  }
+
+  return items;
 }

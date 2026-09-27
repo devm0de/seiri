@@ -9,8 +9,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Dimensions,
+  KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   Text,
   TextInput,
   View,
@@ -572,6 +574,9 @@ function ActionBtn({
 // ────────────────────────────────────────────────────────────────
 // Organize sheet
 // ────────────────────────────────────────────────────────────────
+const SHEET_COLLAPSED = SCREEN_H * 0.55;
+const SHEET_EXPANDED = SCREEN_H * 0.9;
+
 function OrganizeSheet({
   onClose,
   onKeepHere,
@@ -604,85 +609,138 @@ function OrganizeSheet({
     return state.deviceAlbums.filter((d) => !appAlbumNames.has(d.name.toLowerCase()));
   }, [state.albums, state.deviceAlbums]);
 
+  // Starts anchored near the bottom (SHEET_COLLAPSED), doesn't cover the
+  // whole screen unless the user deliberately drags the handle up to
+  // SHEET_EXPANDED. Dragging down far enough closes the sheet entirely.
+  const sheetHeight = useSharedValue(SHEET_COLLAPSED);
+  const dragStartHeight = useSharedValue(SHEET_COLLAPSED);
+
+  const dragHandle = Gesture.Pan()
+    .onStart(() => {
+      dragStartHeight.value = sheetHeight.value;
+    })
+    .onUpdate((e) => {
+      // Dragging UP (negative translationY) should INCREASE the height.
+      const next = dragStartHeight.value - e.translationY;
+      sheetHeight.value = Math.max(SHEET_COLLAPSED * 0.5, Math.min(SHEET_EXPANDED, next));
+    })
+    .onEnd((e) => {
+      const draggedWellBelowCollapsed = sheetHeight.value < SHEET_COLLAPSED * 0.65;
+      const flungDownFast = e.velocityY > 800;
+      if (draggedWellBelowCollapsed || flungDownFast) {
+        runOnJS(onClose)();
+        return;
+      }
+      const midpoint = (SHEET_COLLAPSED + SHEET_EXPANDED) / 2;
+      const target = sheetHeight.value > midpoint || e.velocityY < -800 ? SHEET_EXPANDED : SHEET_COLLAPSED;
+      sheetHeight.value = withSpring(target, { damping: 22 });
+    });
+
+  const animatedSheetStyle = useAnimatedStyle(() => ({
+    height: sheetHeight.value,
+  }));
+
   return (
     <View style={styles.sheetOverlay} testID="organize-sheet">
       <Pressable style={styles.sheetBackdrop} onPress={onClose} />
-      <View style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}>
-        <View style={styles.sheetHandle} />
-        <Text style={styles.sheetTitle}>What would you like to do?</Text>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={{ width: "100%" }}
+      >
+        <Animated.View
+          style={[styles.sheet, animatedSheetStyle, { paddingBottom: insets.bottom + 16 }]}
+        >
+          {/* Only this handle area responds to drag, so scrolling the list
+              below it still works normally with a regular finger swipe. */}
+          <GestureDetector gesture={dragHandle}>
+            <View style={styles.dragZone} testID="organize-sheet-drag-handle">
+              <View style={styles.sheetHandle} />
+            </View>
+          </GestureDetector>
 
-        <Pressable style={styles.sheetRow} onPress={onKeepHere} testID="keep-here-btn">
-          <Ionicons name="checkmark-circle" size={22} color={colors.success} />
-          <Text style={styles.sheetRowText}>Keep in current location</Text>
-        </Pressable>
+          <Text style={styles.sheetTitle}>What would you like to do?</Text>
 
-        {state.albums.length > 0 && (
-          <>
-            <Text style={styles.sheetSection}>Move to album</Text>
-            {state.albums.map((a) => (
-              <Pressable
-                key={a.id}
-                style={styles.sheetRow}
-                onPress={() => onPickAlbum(a.id, a.name)}
-                testID={`album-pick-${a.id}`}
-              >
-                <Ionicons name="folder" size={22} color={colors.brandPrimary} />
-                <Text style={styles.sheetRowText}>{a.name}</Text>
-                <Text style={styles.sheetRowMeta}>{a.count}</Text>
-              </Pressable>
-            ))}
-          </>
-        )}
-
-        {deviceOnlyAlbums.length > 0 && (
-          <>
-            <Text style={styles.sheetSection}>Your phone's other albums</Text>
-            {deviceOnlyAlbums.map((a) => (
-              <Pressable
-                key={a.id}
-                style={styles.sheetRow}
-                onPress={() => onPickDeviceAlbum(a.name)}
-                testID={`device-album-pick-${a.id}`}
-              >
-                <Ionicons name="phone-portrait-outline" size={22} color={colors.brandPrimary} />
-                <Text style={styles.sheetRowText}>{a.name}</Text>
-                <Text style={styles.sheetRowMeta}>{a.assetCount}</Text>
-              </Pressable>
-            ))}
-          </>
-        )}
-
-        <Text style={styles.sheetSection}>Create new album</Text>
-        <View style={styles.sheetInputRow}>
-          <TextInput
-            style={styles.sheetInput}
-            placeholder="Album name"
-            placeholderTextColor={colors.muted}
-            value={input}
-            onChangeText={setInput}
-            testID="new-album-input"
-          />
-          <Pressable
-            disabled={!input.trim()}
-            onPress={() => onCreateAndPick(input.trim())}
-            style={[
-              styles.sheetInputBtn,
-              { backgroundColor: input.trim() ? colors.brandPrimary : colors.surfaceTertiary },
-            ]}
-            testID="create-album-and-move-btn"
-          >
-            <Ionicons
-              name="add"
-              size={22}
-              color={input.trim() ? "#FFF" : colors.muted}
+          {/* Pinned here, above the scroll area, so it's always visible
+              right away instead of needing to scroll down to find it. */}
+          <Text style={styles.sheetSection}>Create new album</Text>
+          <View style={styles.sheetInputRow}>
+            <TextInput
+              style={styles.sheetInput}
+              placeholder="Album name"
+              placeholderTextColor={colors.muted}
+              value={input}
+              onChangeText={setInput}
+              testID="new-album-input"
             />
-          </Pressable>
-        </View>
+            <Pressable
+              disabled={!input.trim()}
+              onPress={() => onCreateAndPick(input.trim())}
+              style={[
+                styles.sheetInputBtn,
+                { backgroundColor: input.trim() ? colors.brandPrimary : colors.surfaceTertiary },
+              ]}
+              testID="create-album-and-move-btn"
+            >
+              <Ionicons
+                name="add"
+                size={22}
+                color={input.trim() ? "#FFF" : colors.muted}
+              />
+            </Pressable>
+          </View>
 
-        <Pressable style={styles.sheetSkip} onPress={onSkip} testID="skip-organize-btn">
-          <Text style={{ color: colors.muted }}>Don't ask again</Text>
-        </Pressable>
-      </View>
+          <ScrollView
+            style={{ flex: 1 }}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            <Pressable style={styles.sheetRow} onPress={onKeepHere} testID="keep-here-btn">
+              <Ionicons name="checkmark-circle" size={22} color={colors.success} />
+              <Text style={styles.sheetRowText}>Keep in current location</Text>
+            </Pressable>
+
+            {state.albums.length > 0 && (
+              <>
+                <Text style={styles.sheetSection}>Move to album</Text>
+                {state.albums.map((a) => (
+                  <Pressable
+                    key={a.id}
+                    style={styles.sheetRow}
+                    onPress={() => onPickAlbum(a.id, a.name)}
+                    testID={`album-pick-${a.id}`}
+                  >
+                    <Ionicons name="folder" size={22} color={colors.brandPrimary} />
+                    <Text style={styles.sheetRowText}>{a.name}</Text>
+                    <Text style={styles.sheetRowMeta}>{a.count}</Text>
+                  </Pressable>
+                ))}
+              </>
+            )}
+
+            {deviceOnlyAlbums.length > 0 && (
+              <>
+                <Text style={styles.sheetSection}>Your phone's other albums</Text>
+                {deviceOnlyAlbums.map((a) => (
+                  <Pressable
+                    key={a.id}
+                    style={styles.sheetRow}
+                    onPress={() => onPickDeviceAlbum(a.name)}
+                    testID={`device-album-pick-${a.id}`}
+                  >
+                    <Ionicons name="phone-portrait-outline" size={22} color={colors.brandPrimary} />
+                    <Text style={styles.sheetRowText}>{a.name}</Text>
+                    <Text style={styles.sheetRowMeta}>{a.assetCount}</Text>
+                  </Pressable>
+                ))}
+              </>
+            )}
+
+            <Pressable style={styles.sheetSkip} onPress={onSkip} testID="skip-organize-btn">
+              <Text style={{ color: colors.muted }}>Don't ask again</Text>
+            </Pressable>
+          </ScrollView>
+        </Animated.View>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -872,6 +930,11 @@ const useStyles = makeStyles((c) => ({
     borderTopRightRadius: 24,
     paddingHorizontal: 16,
     paddingTop: 8,
+    overflow: "hidden",
+  },
+  dragZone: {
+    paddingVertical: 8,
+    alignItems: "center",
   },
   sheetHandle: {
     width: 40,
@@ -879,7 +942,7 @@ const useStyles = makeStyles((c) => ({
     borderRadius: 2,
     backgroundColor: c.borderStrong,
     alignSelf: "center",
-    marginBottom: 12,
+    marginBottom: 0,
   },
   sheetTitle: { fontSize: 18, fontWeight: "700", color: c.onSurface, marginBottom: 12 },
   sheetRow: {
